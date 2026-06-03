@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -39,7 +40,7 @@ class TribesBridge:
 		if compile_first:
 			compile_java()
 
-		classpath = f"{BUILD_DIR}:{LIB_DIR / 'json.jar'}"
+		classpath = f"{BUILD_DIR}{os.pathsep}{LIB_DIR / 'json.jar'}"
 		self._process = subprocess.Popen(
 			["java", "-cp", classpath, "core.game.BridgeServer"],
 			cwd=TRIBES_DIR,

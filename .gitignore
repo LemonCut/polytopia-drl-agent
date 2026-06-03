@@ -1,3 +1,5 @@
 .venv
 .vscode
 __pycache__
+diagnose_gpu.py
+testing
