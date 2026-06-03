@@ -30,3 +30,23 @@ env.close()
 ```
 
 The action mask is available through `env.action_masks()`, and the raw legal action list is in `info["legal_actions"]`.
+
+## DQN Training
+
+`dqn.py` now provides a masked Deep Q-Network implementation on top of `TribesEnv`.
+
+Train on the sample level:
+
+```bash
+python dqn.py train --level-file tribes/levels/SampleLevel.csv --game-mode SCORE --train-episodes 100 --no-resume
+```
+
+By default, training starts fresh instead of resuming an old checkpoint, decays exploration faster than the earlier prototype, and scales rewards before they hit the replay buffer for more stable optimization. You can turn on periodic greedy evaluation during training with `--eval-every-episodes` and `--eval-episodes-during-train`, and adjust reward scaling with `--reward-scale`.
+
+Evaluate a saved checkpoint:
+
+```bash
+python dqn.py eval --level-file tribes/levels/SampleLevel.csv --game-mode SCORE --checkpoint-path checkpoints/dqn.pt
+```
+
+The agent encodes the JSON observation into fixed-size features, respects the action mask when choosing actions, and saves checkpoints with model and optimizer state so training can be resumed.
