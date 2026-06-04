@@ -9,8 +9,11 @@ import os
 import socket
 import time
 import atexit
+import torch
 
-from dqn import DQNAgent
+from dqn import DQNAgent, DQNConfig
+from ppo import PPOAgent, PPOConfig
+
 from tribes_env import TribesEnv
 from encoder import JsonStateEncoder
 
