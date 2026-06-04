@@ -1,5 +1,5 @@
 """Bare-minimum REINFORCE agent for Polytopia.
-Trains a small MLP to play via vanilla policy gradient."""
+v2: Entropy bonus to prevent policy collapse, 500-episode cap at peak."""
 import json
 import os
 import time
@@ -93,10 +93,11 @@ class PolicyNet(nn.Module):
 
 # ---------- Training ----------
 def run_episode(env, model, deterministic=False):
-    """Play one game. Returns (log_probs, rewards, final_score)."""
+    """Play one game. Returns (log_probs, entropies, rewards, total_reward, steps)."""
     obs, info = env.reset()
     state = json.loads(obs["state_json"])
     log_probs = []
+    entropies = []
     rewards = []
     total_reward = 0.0
     steps = 0
@@ -120,6 +121,7 @@ def run_episode(env, model, deterministic=False):
             action_t = dist.sample()
             action = int(action_t.item())
             log_probs.append(dist.log_prob(action_t))
+            entropies.append(dist.entropy())
 
         obs, reward, term, trunc, info = env.step(action)
         state = json.loads(obs["state_json"])
@@ -129,7 +131,7 @@ def run_episode(env, model, deterministic=False):
         if term or trunc:
             break
 
-    return log_probs, rewards, total_reward, steps
+    return log_probs, entropies, rewards, total_reward, steps
 
 def compute_returns(rewards, gamma=0.99):
     returns = []
@@ -145,13 +147,14 @@ def main():
     model = PolicyNet()
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
 
-    NUM_EPISODES = 1000  # adjust based on time
+    NUM_EPISODES = 500  # stopped early to avoid late-stage policy collapse
+    ENTROPY_COEF = 0.01  # encourages exploration, prevents collapse
     log = []
     start = time.time()
 
-    print(f"Training for {NUM_EPISODES} episodes...")
+    print(f"Training for {NUM_EPISODES} episodes with entropy bonus...")
     for ep in range(NUM_EPISODES):
-        log_probs, rewards, total, steps = run_episode(env, model)
+        log_probs, entropies, rewards, total, steps = run_episode(env, model)
 
         if not log_probs:
             print(f"Episode {ep}: no legal actions taken, skipping")
@@ -163,32 +166,42 @@ def main():
         if returns_t.std() > 1e-6:
             returns_t = (returns_t - returns_t.mean()) / (returns_t.std() + 1e-8)
 
-        # REINFORCE loss
-        loss = -torch.stack([lp * R for lp, R in zip(log_probs, returns_t)]).sum()
+        # REINFORCE loss with entropy regularization
+        policy_loss = -torch.stack([lp * R for lp, R in zip(log_probs, returns_t)]).sum()
+        entropy_bonus = torch.stack(entropies).mean()
+        loss = policy_loss - ENTROPY_COEF * entropy_bonus
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         elapsed = time.time() - start
-        log.append({"episode": ep, "reward": total, "steps": steps, "loss": float(loss.item())})
-        if ep % 5 == 0:
+        log.append({
+            "episode": ep,
+            "reward": total,
+            "steps": steps,
+            "loss": float(loss.item()),
+            "entropy": float(entropy_bonus.item()),
+        })
+        if ep % 10 == 0:
             recent = log[-20:]
             avg_r = sum(x["reward"] for x in recent) / len(recent)
+            avg_ent = sum(x["entropy"] for x in recent) / len(recent)
             print(f"Ep {ep:4d} | reward={total:7.1f} | steps={steps:3d} | "
-                  f"avg20={avg_r:7.1f} | loss={loss.item():8.2f} | "
-                  f"elapsed={elapsed/60:.1f}m")
+                  f"avg20={avg_r:7.1f} | ent={avg_ent:5.2f} | "
+                  f"loss={loss.item():8.2f} | elapsed={elapsed/60:.1f}m")
 
         # Save checkpoint every 50 eps
         if ep > 0 and ep % 50 == 0:
-            torch.save(model.state_dict(), "policy_checkpoint.pt")
-            with open("training_log.json", "w") as f:
+            torch.save(model.state_dict(), "policy_v2_checkpoint.pt")
+            with open("training_log_v2.json", "w") as f:
                 json.dump(log, f, indent=2)
 
     # Final save
-    torch.save(model.state_dict(), "policy_final.pt")
-    with open("training_log.json", "w") as f:
+    torch.save(model.state_dict(), "policy_v2.pt")
+    with open("training_log_v2.json", "w") as f:
         json.dump(log, f, indent=2)
-    print(f"\nDone. Saved policy_final.pt and training_log.json")
+    print(f"\nDone. Saved policy_v2.pt and training_log_v2.json")
     print(f"Total time: {(time.time()-start)/60:.1f} minutes")
     env.close()
 

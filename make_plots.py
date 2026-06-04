@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Training curve
-with open("training_log.json") as f:
+with open("training_log_v2.json") as f:
     log = json.load(f)
 eps = [x["episode"] for x in log]
 rewards = [x["reward"] for x in log]
@@ -26,7 +26,7 @@ print("Saved training_curve.png")
 
 # Comparison plot
 try:
-    with open("eval_results.json") as f:
+    with open("eval_results_v2.json") as f:
         ev = json.load(f)
     fig2, ax2 = plt.subplots(figsize=(6, 5))
     labels = ["Random", "Trained NN"]
