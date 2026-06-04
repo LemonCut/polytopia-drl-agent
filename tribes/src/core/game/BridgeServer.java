@@ -304,6 +304,18 @@ public class BridgeServer {
             ag = new players.SimpleAgent(seed);
         } else if (agentName.equalsIgnoreCase("Human")) {
             ag = new players.HumanAgent(ac);
+        } else if (agentName.equalsIgnoreCase("NeuralPolicyAgent")) {
+            ag = new players.NeuralPolicyAgent(seed);
+        } else if (agentName.equalsIgnoreCase("AZMCTSAgent")) {
+            players.azmcts.MCTSParams params = new players.azmcts.MCTSParams();
+            params.stop_type = params.STOP_ITERATIONS;
+            params.num_iterations = 128;
+            params.heuristic_method = params.DIFF_HEURISTIC;
+            params.PRIORITIZE_ROOT = true;
+            params.ROLLOUT_LENGTH = 10;
+            params.FORCE_TURN_END = 11;
+            params.ROLOUTS_ENABLED = false;
+            ag = new players.azmcts.MCTSPlayer(seed, params);
         } else {
             throw new IllegalArgumentException("Unsupported Java agent type: " + agentName);
         }

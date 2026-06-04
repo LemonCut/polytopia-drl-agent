@@ -82,7 +82,10 @@ class TribesBridge:
 		response_line = self._process.stdout.readline()
 		if not response_line:
 			raise RuntimeError("Bridge process closed the pipe")
-		response = json.loads(response_line)
+		try:
+			response = json.loads(response_line)
+		except json.JSONDecodeError:
+			raise RuntimeError(f"Failed to parse JSON. Raw response: {repr(response_line)}")
 		if not response.get("ok", False):
 			raise RuntimeError(response.get("error", "Unknown bridge error"))
 		return response
