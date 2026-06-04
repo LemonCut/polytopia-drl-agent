@@ -125,6 +125,21 @@ public class Game {
         updateAssignedGameStates();
     }
 
+    public void initForBridge(GameState gs, Agent[] players) {
+        this.gs = gs;
+        this.players = players;
+        this.numPlayers = players.length;
+        this.aiStats = new AIStats[numPlayers];
+        this.gpStats = new GameplayStats[numPlayers];
+        this.gameStateObservations = new GameState[numPlayers];
+
+        for (int i = 0; i < numPlayers; i++) {
+            this.aiStats[i] = new AIStats(i);
+            this.gpStats[i] = new GameplayStats(i);
+            this.gameStateObservations[i] = gs.copy(i);
+        }
+    }
+
     /**
      * Initializes game structures depending on number of players and tribes
      *
@@ -577,6 +592,9 @@ public class Game {
 
     public void setAnimationPaused(boolean p) {
         animationPaused = p;
+    }
+    public boolean isAnimationPaused() {
+        return animationPaused;
     }
     public void setPaused(boolean p) {
         paused = p;

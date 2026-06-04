@@ -58,6 +58,8 @@ class TribesEnv(gym.Env):
 		level_file = options.get("level_file", self.level_file)
 		level_seed = options.get("level_seed", self.level_seed)
 		tribes = options.get("tribes", self.tribes)
+		agents = options.get("agents", None)
+		visuals = options.get("visuals", False)
 		game_mode = options.get("game_mode", self.game_mode)
 		seed_value = options.get("seed", seed if seed is not None else self.seed_value)
 
@@ -66,6 +68,8 @@ class TribesEnv(gym.Env):
 				level_file=level_file,
 				game_mode=game_mode,
 				seed=seed_value,
+				agents=agents,
+				visuals=visuals,
 			)
 		elif level_seed is not None and tribes is not None:
 			response = self.bridge.reset(
@@ -73,6 +77,8 @@ class TribesEnv(gym.Env):
 				tribes=tribes,
 				game_mode=game_mode,
 				seed=seed_value,
+				agents=agents,
+				visuals=visuals,
 			)
 		else:
 			raise ValueError("TribesEnv.reset requires level_file or level_seed + tribes")
@@ -105,6 +111,24 @@ class TribesEnv(gym.Env):
 		info = self._make_info()
 		info["chosen_action_index"] = action_index
 		info["chosen_action"] = self._legal_actions[action_index] if action_index < len(self._legal_actions) else None
+		return observation, reward, terminated, truncated, info
+
+	def agent_step(self):
+		self._ensure_ready()
+
+		previous_state = self._state
+		response = self.bridge.agent_step()
+		self._steps += 1
+		self._set_state(response["state"], response.get("actions"))
+
+		reward = self._compute_reward(previous_state, self._state)
+		terminated = bool(self._state.get("gameIsOver", False))
+		truncated = bool(self.max_episode_steps is not None and self._steps >= self.max_episode_steps and not terminated)
+
+		observation = self._make_observation(self._state)
+		info = self._make_info()
+		info["chosen_action_index"] = -1
+		info["chosen_action"] = None
 		return observation, reward, terminated, truncated, info
 
 	def action_masks(self) -> np.ndarray:

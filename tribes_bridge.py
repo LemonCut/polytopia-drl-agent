@@ -95,10 +95,16 @@ class TribesBridge:
 		tribes: list[int | str] | None = None,
 		game_mode: str | int = "SCORE",
 		seed: int | None = None,
+		agents: list[str] | None = None,
+		visuals: bool = False,
 	) -> dict[str, Any]:
 		message: dict[str, Any] = {"cmd": "reset", "gameMode": game_mode}
 		if seed is not None:
 			message["seed"] = seed
+		if agents is not None:
+			message["agents"] = agents
+		if visuals:
+			message["visuals"] = True
 		if level_file is not None:
 			message["levelFile"] = self._resolve_path(level_file)
 		elif level_seed is not None and tribes is not None:
@@ -116,6 +122,9 @@ class TribesBridge:
 
 	def step(self, action_index: int) -> dict[str, Any]:
 		return self._request({"cmd": "step", "actionIndex": action_index})
+
+	def agent_step(self) -> dict[str, Any]:
+		return self._request({"cmd": "agent_step"})
 
 	def close(self) -> None:
 		if self._process.poll() is None:
