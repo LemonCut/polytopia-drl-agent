@@ -1,3 +1,4 @@
+from pathlib import Path
 import argparse
 import json
 from pathlib import Path
@@ -33,13 +34,20 @@ def run_game(agents, tribes, level_seed=-1, game_seed=-1, max_steps=2000, visual
     for i, agent_arg in enumerate(agents):
         path = Path(agent_arg)
         if path.exists() and path.suffix == ".pt":
-            import torch
-            from dqn import DQNConfig
             checkpoint = torch.load(path, map_location="cpu")
-            loaded_config = DQNConfig(**checkpoint["config"])
-            loaded_config.device = "cuda" if torch.cuda.is_available() else "cpu"
-            agent, extra = DQNAgent.load(path, config=loaded_config)
-            agent.online.eval()
+            checkpoint_config = checkpoint["config"]
+            if "clip_range" in checkpoint_config: # specific to PPO
+                loaded_config = PPOConfig(**checkpoint_config)
+                loaded_config.device = ("cuda" if torch.cuda.is_available() else
+                                        "mps" if torch.mps.is_available() else "cpu")
+                agent, extra = PPOAgent.load(path, config=loaded_config)
+            
+            else: # assume DQN, will need to change later for other models
+                loaded_config = DQNConfig(**checkpoint["config"])
+                loaded_config.device = "cuda" if torch.cuda.is_available() else "cpu"
+                agent, extra = DQNAgent.load(path, config=loaded_config)
+                agent.online.eval()
+            
             python_agents[i] = agent
             encoder = JsonStateEncoder(
                 agent.config.encoder_mode, 
