@@ -17,6 +17,7 @@ from typing import Any
 import time
 import gc
 from copy import deepcopy
+import zlib
 
 
 import numpy as np
@@ -49,12 +50,15 @@ class PPOConfig:
     engineered_dim: int = 1024
     raw_dim: int = 256
 
+    # Action encoder
+    action_feature_dim : int = 256
+
     # Network
     hidden_dim: int = 1024
-    residual_blocks: int = 3
+    residual_blocks: int = 1
 
     # PPO
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
@@ -69,17 +73,17 @@ class PPOConfig:
     gradient_clip_norm: float = 1.0
 
     # Rollout collection
-    rollout_steps: int = 512 # ?2048
+    rollout_steps: int = 1000 # ?2048
     reward_scale: float = 100.0
 
     # Training schedule
     total_iterations: int = 1000
 
     # Evaluation
-    eval_every_iterations: int = 25
+    eval_every_iterations: int = 5
     eval_episodes: int = 5
     eval_seed_offset: int = 10000
-    eval_max_steps_per_episode: int = 512 # ?2048
+    eval_max_steps_per_episode: int = 1000 # ?2048
 
     # Episode limits
     max_steps_per_episode: int = 2000
@@ -90,6 +94,90 @@ class PPOConfig:
 
     # Device
     device: str = "mps" # cpu
+
+# %% [markdown]
+# #### Action Encoder
+class ActionTextEncoder:
+    ACTION_TYPES = (
+        "RESEARCH_TECH",
+        "END_TURN",
+        "MOVE",
+        "ATTACK",
+        "CAPTURE",
+        "SPAWN",
+        "BUILD",
+        "LEVEL_UP",
+        "RESOURCE_GATHERING",
+        "RECOVER",
+        "MAKE_VETERAN",
+        "BUILD_ROAD",
+        "CLEAR_FOREST",
+        "BURN_FOREST",
+        "GROW_FOREST",
+        "DESTROY",
+        "DISBAND",
+        "UPGRADE",
+        "CONVERT",
+        "HEAL_OTHERS",
+        "EXAMINE",
+    )
+
+    def __init__(self, output_dim=192):
+        self.output_dim = output_dim
+        self.type_to_index = {
+            name: i
+            for i, name in enumerate(self.ACTION_TYPES)
+        }
+
+    def encode(self, action):
+        vector = np.zeros(
+            self.output_dim,
+            dtype=np.float32,
+        )
+
+        action_type = str(
+            action.get("type", "")
+        )
+
+        text = str(
+            action.get("text", "")
+        ).lower()
+
+        if (
+            action_type in self.type_to_index
+            and self.type_to_index[action_type]
+            < self.output_dim
+        ):
+            vector[
+                self.type_to_index[action_type]
+            ] = 1.0
+
+        offset = min(
+            len(self.ACTION_TYPES),
+            self.output_dim,
+        )
+
+        buckets = max(
+            1,
+            self.output_dim - offset,
+        )
+
+        for token in (text.replace(":", " ").replace(",", " ").split()):
+            idx = (offset + zlib.crc32(token.encode("utf-8")) % buckets)
+            vector[idx] += 1.0
+        
+        for start in range(max(0, len(text) - 2)):
+            ngram = text[start:start + 3]
+            idx = (offset+ zlib.crc32(ngram.encode("utf-8")) % buckets)
+            vector[idx] += 0.25
+
+        norm = np.linalg.norm(vector)
+
+        if norm > 0:
+            vector /= norm
+
+        return vector
+
 
 # %% [markdown]
 # #### Env Helper
@@ -103,11 +191,20 @@ def make_env(config: PPOConfig) -> TribesEnv:
         compile_first=config.compile_first,
     )
 
+def encode_legal_actions(
+    info,
+    action_encoder,
+):
+    return np.stack([
+        action_encoder.encode(a)
+        for a in info["legal_actions"]
+    ]).astype(np.float32)
 
 def evaluate_agent(
     agent,
     config,
     encoder,
+    action_encoder,
     episodes,
     seed_offset=0,
 ):
@@ -133,9 +230,15 @@ def evaluate_agent(
 
         for _ in range(config.eval_max_steps_per_episode):
 
-            mask = np.asarray(info["action_mask"], dtype=np.bool_)
+            legal_action_features = encode_legal_actions(
+                info,
+                action_encoder,
+            )
 
-            action = agent.select_greedy_action(state, mask)
+            action = agent.select_greedy_action(
+                state,
+                legal_action_features,
+            )
 
             next_obs, reward, terminated, truncated, next_info = env.step(action)
 
@@ -207,46 +310,59 @@ class ResidualBlock(nn.Module):
 class PPOModel(nn.Module):
     def __init__(
         self,
-        state_dim: int,
-        action_dim: int,
-        hidden_dim: int,
-        residual_blocks: int,
+        state_dim,
+        action_feature_dim,
+        hidden_dim,
+        residual_blocks
     ):
         super().__init__()
 
-        layers = [
+        default_layers = [
             nn.Linear(state_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
         ]
 
         for _ in range(residual_blocks):
-            layers.append(
-                ResidualBlock(hidden_dim)
-            )
+            default_layers.append(ResidualBlock(hidden_dim))
 
-        self.trunk = nn.Sequential(*layers)
+        self.state_net = nn.Sequential(*default_layers)
 
-        self.policy_head = nn.Linear(
-            hidden_dim,
-            action_dim,
+        # residual blocks unused
+        self.action_net = nn.Sequential(
+            nn.Linear(action_feature_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU()
         )
 
-        self.value_head = nn.Linear(
-            hidden_dim,
-            1,
+        self.policy_head = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1)
         )
 
-    def forward(self, states):
-        features = self.trunk(states)
+        self.value_head = nn.Linear(hidden_dim, 1)
 
-        logits = self.policy_head(features)
+    def forward(self,states, action_features):
+        state_emb = self.state_net(states)
+        action_emb = self.action_net(action_features)
 
-        values = self.value_head(
-            features
-        ).squeeze(-1)
+        state_expanded = state_emb.unsqueeze(1).expand(-1, action_emb.shape[1], -1)
+        x = torch.cat([state_expanded, action_emb, state_expanded * action_emb], dim=-1)
+        logits = self.policy_head(x).squeeze(-1)
+        values = self.value_head(state_emb).squeeze(-1)
 
         return logits, values
+    
+    def value(self, states):
+        state_emb = self.state_net(states)
+        return self.value_head(state_emb).squeeze(-1)
 
 # %% [markdown]
 # #### Rollout utilities
@@ -257,7 +373,7 @@ def masked_categorical(logits, action_masks,):
     return torch.distributions.Categorical(logits=logits)
 
 
-def compute_gae(rewards, dones, values, last_value, gamma, gae_lambda,):
+def compute_gae(rewards, dones, values, last_value, gamma, gae_lambda):
     advantages = []
 
     gae = 0.0
@@ -306,7 +422,7 @@ class RolloutBuffer:
     values: list
     log_probs: list
 
-    masks: list
+    action_features: list
 
     final_state: np.ndarray
     final_mask: np.ndarray
@@ -319,7 +435,6 @@ class PPOAgent:
     def __init__(
         self,
         state_dim,
-        action_dim,
         config,
     ):
         self.config = config
@@ -330,7 +445,7 @@ class PPOAgent:
 
         self.model = PPOModel(
             state_dim,
-            action_dim,
+            config.action_feature_dim,
             config.hidden_dim,
             config.residual_blocks,
         ).to(self.device)
@@ -352,16 +467,14 @@ class PPOAgent:
 
         state_dict = checkpoint["model_state_dict"]
 
-        first_weight = state_dict["trunk.0.weight"]
+        if config.encoder_mode == "engineered":
+            state_dim = config.engineered_dim
+        elif config.encoder_mode == "raw":
+            state_dim = config.raw_dim
+        else:
+            state_dim = (config.engineered_dim + config.raw_dim)
 
-        state_dim = first_weight.shape[1]
-
-        policy_weight = state_dict["policy_head.weight"]
-
-        action_dim = policy_weight.shape[0]
-
-        agent = cls(state_dim,action_dim,config)
-
+        agent = cls(state_dim,config)
         agent.model.load_state_dict(state_dict)
 
         if ("optimizer_state_dict" in checkpoint):
@@ -379,31 +492,34 @@ class PPOAgent:
 
         return agent, extra
     
-    def select_action( self, state, action_mask, epsilon=0.0, greedy=False):
-        if greedy: return self.select_greedy_action(state, action_mask)
-        action, _, _ = self.select_action_sample(state, action_mask)
+    def select_action( self, state, action_features, epsilon=0.0, greedy=False):
+        if greedy: return self.select_greedy_action(state, action_features)
+        action, _, _ = self.select_action_sample(state, action_features)
         return action
 
     @torch.no_grad()
-    def select_action_sample(
-        self,
-        state,
-        action_mask,
-    ):
+    def select_action_sample(self, state, action_features):
         state_tensor = torch.as_tensor(
             state,
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
 
-        mask_tensor = torch.as_tensor(
-            action_mask,
-            dtype=torch.bool,
+        action_tensor = torch.as_tensor(
+            action_features,
+            dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
 
+        mask_tensor = torch.ones(
+            (1, action_features.shape[0]),
+            dtype=torch.bool,
+            device=self.device,
+        )
+
         logits, values = self.model(
-            state_tensor
+            state_tensor,
+            action_tensor,
         )
 
         dist = masked_categorical(
@@ -423,7 +539,7 @@ class PPOAgent:
     def select_greedy_action(
         self,
         state,
-        action_mask,
+        action_features,
     ):
         state_tensor = torch.as_tensor(
             state,
@@ -431,17 +547,15 @@ class PPOAgent:
             device=self.device,
         ).unsqueeze(0)
 
-        mask_tensor = torch.as_tensor(
-            action_mask,
-            dtype=torch.bool,
+        action_tensor = torch.as_tensor(
+            action_features,
+            dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
 
-        logits, _ = self.model(state_tensor)
-
-        logits = logits.masked_fill(
-            ~mask_tensor,
-            torch.finfo(logits.dtype).min,
+        logits, _ = self.model(
+            state_tensor,
+            action_tensor,
         )
 
         action = torch.argmax(
@@ -451,15 +565,15 @@ class PPOAgent:
 
         return int(action.item())
     
-    @torch.no_grad()
-    def predict_value(self,state):
-        state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device,).unsqueeze(0)
+    # @torch.no_grad()
+    # def predict_value(self,state):
+    #     state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device,).unsqueeze(0)
 
-        _, value = self.model(state_tensor)
+    #     _, value = self.model(state_tensor)
 
-        return float(value.squeeze(0).item())
+    #     return float(value.squeeze(0).item())
     
-    def update(
+    def ppo_update(
         self,
         states,
         actions,
@@ -467,9 +581,11 @@ class PPOAgent:
         returns,
         advantages,
         action_masks,
+        action_features,
     ):
         logits, values = self.model(
-            states
+            states, 
+            action_features
         )
 
         dist = masked_categorical(
@@ -555,13 +671,12 @@ def collect_rollout(
     env,
     agent,
     encoder,
+    action_encoder,
     config,
 ):
     obs, info = env.reset()
 
-    state = encoder.encode(
-        obs["state_json"]
-    )
+    state = encoder.encode(obs["state_json"])
 
     rollout = RolloutBuffer(
         states=[],
@@ -570,20 +685,16 @@ def collect_rollout(
         dones=[],
         values=[],
         log_probs=[],
-        masks=[],
+        action_features=[],
         final_state = None,
         final_mask = None
     )
 
     while (len(rollout.states) < config.rollout_steps):
-        mask = np.asarray(
-            info["action_mask"],
-            dtype=np.bool_,
-        )
+        legal_action_features = encode_legal_actions(info,action_encoder)
 
-        (action, log_prob, value,) = agent.select_action_sample(state,mask,)
-
-        (next_obs,reward,terminated,truncated,next_info,) = env.step(action)
+        action, log_prob, value = agent.select_action(state, legal_action_features)
+        next_obs, reward, terminated, truncated, next_info = env.step(action)
 
         rollout.states.append(state)
         rollout.actions.append(action)
@@ -591,7 +702,8 @@ def collect_rollout(
         rollout.dones.append(terminated or truncated)
         rollout.values.append(value)
         rollout.log_probs.append(log_prob)
-        rollout.masks.append(mask)
+        
+        rollout.action_features.append(encode_legal_actions(info, action_encoder))
         
         state = encoder.encode(next_obs["state_json"])
 

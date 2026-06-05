@@ -12,7 +12,7 @@ import atexit
 import torch
 
 from dqn import DQNAgent, DQNConfig
-from ppo import PPOAgent, PPOConfig
+from ppo import PPOAgent, PPOConfig, ActionTextEncoder, encode_legal_actions
 from rank_a2c import RankA2CAgent, RankA2CConfig
 from expert_rank_distill import ActionTextEncoder, encode_legal_actions
 
@@ -47,6 +47,7 @@ def run_game(agents, tribes, level_seed=-1, game_seed=-1, max_steps=2000, visual
                 loaded_config.device = ("cuda" if torch.cuda.is_available() else
                                         "mps" if torch.mps.is_available() else "cpu")
                 agent, extra = PPOAgent.load(path, config=loaded_config)
+                python_action_encoders[i] = ActionTextEncoder(agent.config.action_feature_dim)
             
             elif "action_feature_dim" in checkpoint_config: # specific to RankA2C
                 loaded_config = RankA2CConfig(**checkpoint_config)
@@ -149,6 +150,11 @@ def run_game(agents, tribes, level_seed=-1, game_seed=-1, max_steps=2000, visual
                     action_encoder = python_action_encoders[active_tribe_id]
                     action_features = encode_legal_actions(info, action_encoder)
                     action, _, _ = agent.act(state, action_features, greedy=True)
+                elif isinstance(agent, PPOAgent):
+                    # currently same as RankA2C, separate for debugging
+                    action_encoder = python_action_encoders[active_tribe_id]
+                    action_features = encode_legal_actions(info, action_encoder)
+                    action = agent.select_greedy_action(state, action_features)
                 else:
                     action = agent.select_action(state, action_mask, epsilon=0.0, greedy=True)
                     
