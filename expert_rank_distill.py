@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from dqn import DEFAULT_ENCODER_MODE, ENGINEERED_FEATURE_DIM, RAW_FEATURE_DIM, JsonStateEncoder
+from encoder import DEFAULT_ENCODER_MODE, ENGINEERED_FEATURE_DIM, RAW_FEATURE_DIM, JsonStateEncoder
 from tribes_env import TribesEnv
 
 

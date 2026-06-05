@@ -24,6 +24,7 @@ except Exception as exc:  # pragma: no cover - imported at runtime
 from tribes_env import TribesEnv
 from vec_env import VecEnv
 from encoder import JsonStateEncoder
+from expert_rank_distill import ActionTextEncoder, encode_legal_actions
 
 
 ENGINEERED_FEATURE_DIM = 1024
@@ -43,6 +44,7 @@ class DQNConfig:
 	encoder_mode: str = DEFAULT_ENCODER_MODE
 	engineered_dim: int = ENGINEERED_FEATURE_DIM
 	raw_dim: int = RAW_FEATURE_DIM
+	action_feature_dim: int = 192
 	hidden_dim: int = 256
 	learning_rate: float = 3e-4
 	gamma: float = 0.99
@@ -75,7 +77,8 @@ class Transition:
 	reward: float
 	next_state: np.ndarray
 	done: bool
-	next_action_mask: np.ndarray
+	action_features: np.ndarray
+	next_action_features: np.ndarray
 
 
 class ReplayBuffer:
@@ -103,29 +106,47 @@ class ReplayBuffer:
 
 
 
-class QNetwork(nn.Module):
-	def __init__(self, input_dim: int, output_dim: int, hidden_dim: int) -> None:
+class ActionConditionedQNetwork(nn.Module):
+	def __init__(self, state_dim: int, action_feature_dim: int, hidden_dim: int) -> None:
 		super().__init__()
-		self.net = nn.Sequential(
-			nn.Linear(input_dim, hidden_dim),
-			nn.ReLU(),
+		self.state_net = nn.Sequential(
+			nn.Linear(state_dim, hidden_dim),
+			nn.LayerNorm(hidden_dim),
+			nn.GELU(),
 			nn.Linear(hidden_dim, hidden_dim),
-			nn.ReLU(),
-			nn.Linear(hidden_dim, output_dim),
+			nn.LayerNorm(hidden_dim),
+			nn.GELU(),
+		)
+		self.action_net = nn.Sequential(
+			nn.Linear(action_feature_dim, hidden_dim),
+			nn.LayerNorm(hidden_dim),
+			nn.GELU(),
+			nn.Linear(hidden_dim, hidden_dim),
+			nn.LayerNorm(hidden_dim),
+			nn.GELU(),
+		)
+		self.q_value = nn.Sequential(
+			nn.Linear(hidden_dim * 3, hidden_dim),
+			nn.GELU(),
+			nn.Linear(hidden_dim, 1),
 		)
 
-	def forward(self, x: torch.Tensor) -> torch.Tensor:
-		return self.net(x)
+	def forward(self, states: torch.Tensor, action_features: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
+		state_features = self.state_net(states)
+		action_emb = self.action_net(action_features)
+		state_expanded = state_features.unsqueeze(1).expand(-1, action_emb.shape[1], -1)
+		x = torch.cat([state_expanded, action_emb, state_expanded * action_emb], dim=-1)
+		q_values = self.q_value(x).squeeze(-1)
+		return q_values.masked_fill(~action_mask, torch.finfo(q_values.dtype).min)
 
 
 class DQNAgent:
-	def __init__(self, state_dim: int, action_dim: int, config: DQNConfig) -> None:
+	def __init__(self, state_dim: int, config: DQNConfig) -> None:
 		self.state_dim = int(state_dim)
-		self.action_dim = int(action_dim)
 		self.config = config
 		self.device = torch.device(config.device)
-		self.online = QNetwork(self.state_dim, self.action_dim, config.hidden_dim).to(self.device)
-		self.target = QNetwork(self.state_dim, self.action_dim, config.hidden_dim).to(self.device)
+		self.online = ActionConditionedQNetwork(self.state_dim, config.action_feature_dim, config.hidden_dim).to(self.device)
+		self.target = ActionConditionedQNetwork(self.state_dim, config.action_feature_dim, config.hidden_dim).to(self.device)
 		self.target.load_state_dict(self.online.state_dict())
 		self.target.eval()
 		self.optimizer = torch.optim.Adam(self.online.parameters(), lr=config.learning_rate)
@@ -138,28 +159,46 @@ class DQNAgent:
 		)
 		self.episodes = 0
 
-	def select_action(self, state: np.ndarray, action_mask: np.ndarray, epsilon: float, greedy: bool = False) -> int:
-		valid_actions = np.flatnonzero(action_mask.astype(bool))
-		if valid_actions.size == 0:
+	def select_action(self, state: np.ndarray, action_features: np.ndarray, epsilon: float, greedy: bool = False) -> int:
+		num_actions = action_features.shape[0]
+		if num_actions == 0:
 			raise RuntimeError("No valid actions available for the current state")
 
 		if (not greedy) and random.random() < epsilon:
-			return int(np.random.choice(valid_actions))
+			return int(np.random.choice(num_actions))
 
 		state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+		action_features_tensor = torch.as_tensor(action_features, dtype=torch.float32, device=self.device).unsqueeze(0)
+		action_mask_tensor = torch.ones((1, num_actions), dtype=torch.bool, device=self.device)
+
 		with torch.no_grad():
-			q_values = self.online(state_tensor).squeeze(0)
-			masked_q = self._masked_q_values(q_values, action_mask)
-			return int(torch.argmax(masked_q).item())
+			q_values = self.online(state_tensor, action_features_tensor, action_mask_tensor).squeeze(0)
+			return int(torch.argmax(q_values).item())
 
 	def train_batch(self, batch: list[Transition]) -> float:
-		# Prepare tensors using pinned CPU memory and async transfer to GPU where possible
+		batch_size = len(batch)
+		max_actions = max(item.action_features.shape[0] for item in batch)
+		max_next_actions = max(item.next_action_features.shape[0] for item in batch)
+		action_feature_dim = self.config.action_feature_dim
+
 		states_np = np.stack([item.state for item in batch]).astype(np.float32, copy=False)
 		actions_np = np.asarray([item.action for item in batch], dtype=np.int64)
 		rewards_np = np.asarray([item.reward for item in batch], dtype=np.float32)
 		next_states_np = np.stack([item.next_state for item in batch]).astype(np.float32, copy=False)
 		dones_np = np.asarray([item.done for item in batch], dtype=np.float32)
-		next_action_masks_np = np.stack([item.next_action_mask for item in batch]).astype(np.bool_)
+
+		action_features_np = np.zeros((batch_size, max_actions, action_feature_dim), dtype=np.float32)
+		action_masks_np = np.zeros((batch_size, max_actions), dtype=np.bool_)
+		next_action_features_np = np.zeros((batch_size, max_next_actions, action_feature_dim), dtype=np.float32)
+		next_action_masks_np = np.zeros((batch_size, max_next_actions), dtype=np.bool_)
+
+		for i, item in enumerate(batch):
+			na = item.action_features.shape[0]
+			action_features_np[i, :na] = item.action_features
+			action_masks_np[i, :na] = True
+			n_na = item.next_action_features.shape[0]
+			next_action_features_np[i, :n_na] = item.next_action_features
+			next_action_masks_np[i, :n_na] = True
 
 		use_pin = torch.cuda.is_available()
 		if use_pin:
@@ -168,6 +207,9 @@ class DQNAgent:
 			rewards = torch.from_numpy(rewards_np).pin_memory()
 			next_states = torch.from_numpy(next_states_np).pin_memory()
 			dones = torch.from_numpy(dones_np).pin_memory()
+			action_features = torch.from_numpy(action_features_np).pin_memory()
+			action_masks = torch.from_numpy(action_masks_np).pin_memory()
+			next_action_features = torch.from_numpy(next_action_features_np).pin_memory()
 			next_action_masks = torch.from_numpy(next_action_masks_np).pin_memory()
 		else:
 			states = torch.from_numpy(states_np)
@@ -175,25 +217,29 @@ class DQNAgent:
 			rewards = torch.from_numpy(rewards_np)
 			next_states = torch.from_numpy(next_states_np)
 			dones = torch.from_numpy(dones_np)
+			action_features = torch.from_numpy(action_features_np)
+			action_masks = torch.from_numpy(action_masks_np)
+			next_action_features = torch.from_numpy(next_action_features_np)
 			next_action_masks = torch.from_numpy(next_action_masks_np)
 
-		# Move to device (non_blocking when pinned and CUDA available)
 		non_blocking = True if use_pin and self.device.type == "cuda" else False
 		states = states.to(self.device, non_blocking=non_blocking)
 		actions = actions.to(self.device, non_blocking=non_blocking)
 		rewards = rewards.to(self.device, non_blocking=non_blocking)
 		next_states = next_states.to(self.device, non_blocking=non_blocking)
 		dones = dones.to(self.device, non_blocking=non_blocking)
+		action_features = action_features.to(self.device, non_blocking=non_blocking)
+		action_masks = action_masks.to(self.device, non_blocking=non_blocking)
+		next_action_features = next_action_features.to(self.device, non_blocking=non_blocking)
 		next_action_masks = next_action_masks.to(self.device, non_blocking=non_blocking)
-		# Forward and loss with optional AMP
+
 		if self.use_amp and self.scaler is not None:
 			with torch.amp.autocast(device_type="cuda"):
-				q_values = self.online(states).gather(1, actions).squeeze(1)
+				q_values = self.online(states, action_features, action_masks).gather(1, actions).squeeze(1)
 				with torch.no_grad():
-					next_online = self.online(next_states)
-					next_online = self._mask_tensor_q_values(next_online, next_action_masks)
+					next_online = self.online(next_states, next_action_features, next_action_masks)
 					next_actions = torch.argmax(next_online, dim=1, keepdim=True)
-					next_target = self.target(next_states).gather(1, next_actions).squeeze(1)
+					next_target = self.target(next_states, next_action_features, next_action_masks).gather(1, next_actions).squeeze(1)
 					targets = rewards + self.config.gamma * (1.0 - dones) * next_target
 				loss = torch.nn.functional.smooth_l1_loss(q_values, targets)
 
@@ -205,12 +251,11 @@ class DQNAgent:
 			self.train_steps += 1
 			return float(loss.item())
 		else:
-			q_values = self.online(states).gather(1, actions).squeeze(1)
+			q_values = self.online(states, action_features, action_masks).gather(1, actions).squeeze(1)
 			with torch.no_grad():
-				next_online = self.online(next_states)
-				next_online = self._mask_tensor_q_values(next_online, next_action_masks)
+				next_online = self.online(next_states, next_action_features, next_action_masks)
 				next_actions = torch.argmax(next_online, dim=1, keepdim=True)
-				next_target = self.target(next_states).gather(1, next_actions).squeeze(1)
+				next_target = self.target(next_states, next_action_features, next_action_masks).gather(1, next_actions).squeeze(1)
 				targets = rewards + self.config.gamma * (1.0 - dones) * next_target
 
 			loss = torch.nn.functional.smooth_l1_loss(q_values, targets)
@@ -229,7 +274,6 @@ class DQNAgent:
 		checkpoint = {
 			"config": asdict(self.config),
 			"state_dim": self.state_dim,
-			"action_dim": self.action_dim,
 			"online_state_dict": self.online.state_dict(),
 			"target_state_dict": self.target.state_dict(),
 			"optimizer_state_dict": self.optimizer.state_dict(),
@@ -244,10 +288,10 @@ class DQNAgent:
 
 	@classmethod
 	def load(cls, path: str | Path, config: DQNConfig | None = None) -> tuple["DQNAgent", dict[str, Any]]:
-		checkpoint = torch.load(Path(path), map_location="cpu")
+		checkpoint = torch.load(Path(path), map_location="cpu", weights_only=False)
 		loaded_config = DQNConfig(**checkpoint["config"])
 		if config is not None:
-			structural_fields = ("encoder_mode", "engineered_dim", "raw_dim", "hidden_dim")
+			structural_fields = ("encoder_mode", "engineered_dim", "raw_dim", "action_feature_dim", "hidden_dim")
 			for field_name in structural_fields:
 				if getattr(config, field_name) != getattr(loaded_config, field_name):
 					raise ValueError(
@@ -255,7 +299,7 @@ class DQNAgent:
 						f"expected {getattr(loaded_config, field_name)!r}, got {getattr(config, field_name)!r}"
 					)
 			loaded_config = config
-		agent = cls(checkpoint["state_dim"], checkpoint["action_dim"], loaded_config)
+		agent = cls(checkpoint["state_dim"], loaded_config)
 		agent.online.load_state_dict(checkpoint["online_state_dict"])
 		agent.target.load_state_dict(checkpoint["target_state_dict"])
 		agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -266,14 +310,6 @@ class DQNAgent:
 		if scaler_state is not None and agent.scaler is not None:
 			agent.scaler.load_state_dict(scaler_state)
 		return agent, checkpoint.get("extra", {})
-
-	def _masked_q_values(self, q_values: torch.Tensor, action_mask: np.ndarray) -> torch.Tensor:
-		mask = torch.as_tensor(action_mask.astype(bool), dtype=torch.bool, device=q_values.device)
-		return q_values.masked_fill(~mask, torch.finfo(q_values.dtype).min)
-
-	def _mask_tensor_q_values(self, q_values: torch.Tensor, action_masks: torch.Tensor) -> torch.Tensor:
-		return q_values.masked_fill(~action_masks, torch.finfo(q_values.dtype).min)
-
 
 def epsilon_by_step(step: int, config: DQNConfig) -> float:
 	if config.epsilon_decay_steps <= 0:
@@ -291,7 +327,7 @@ def make_env(config: DQNConfig) -> TribesEnv:
 	)
 
 
-def evaluate_agent(agent: DQNAgent, config: DQNConfig, encoder: JsonStateEncoder, episodes: int, seed_offset: int = 0) -> dict[str, Any]:
+def evaluate_agent(agent: DQNAgent, config: DQNConfig, encoder: JsonStateEncoder, action_encoder: ActionTextEncoder, episodes: int, seed_offset: int = 0) -> dict[str, Any]:
 	env = make_env(config)
 	results: dict[str, Any] = {"episode_rewards": []}
 	for episode in range(episodes):
@@ -300,8 +336,8 @@ def evaluate_agent(agent: DQNAgent, config: DQNConfig, encoder: JsonStateEncoder
 		episode_reward = 0.0
 		episode_steps = 0
 		for _ in range(config.max_steps_per_episode):
-			action_mask = np.asarray(info["action_mask"], dtype=np.bool_)
-			action = agent.select_action(state, action_mask, epsilon=0.0, greedy=True)
+			action_features = encode_legal_actions(info, action_encoder)
+			action = agent.select_action(state, action_features, epsilon=0.0, greedy=True)
 			next_obs, reward, terminated, truncated, next_info = env.step(action)
 			state = encoder.encode(next_obs["state_json"])
 			info = next_info
@@ -322,6 +358,7 @@ def run_training(config: DQNConfig) -> dict[str, Any]:
 	# Single env used for action space info; main parallel runner will use VecEnv when num_workers>1
 	env = make_env(config)
 	encoder = JsonStateEncoder(config.encoder_mode, config.engineered_dim, config.raw_dim)
+	action_encoder = ActionTextEncoder(config.action_feature_dim)
 	replay = ReplayBuffer(config.replay_size)
 	stats: dict[str, Any] = {"episode_rewards": [], "episode_losses": []}
 	global_step = 0
@@ -341,7 +378,7 @@ def run_training(config: DQNConfig) -> dict[str, Any]:
 		total_updates = int(extra.get("total_updates", 0))
 		best_eval_reward = float(extra.get("best_eval_reward", best_eval_reward))
 	else:
-		agent = DQNAgent(state_dim, env.action_space.n, config)
+		agent = DQNAgent(state_dim, config)
 
 	assert agent is not None
 	agent.online.train()
@@ -380,15 +417,16 @@ def run_training(config: DQNConfig) -> dict[str, Any]:
 				# select actions for all workers
 				actions = []
 				for w in range(config.num_workers):
-					action_mask = np.asarray(infos[w]["action_mask"], dtype=np.bool_)
+					action_features = encode_legal_actions(infos[w], action_encoder)
 					epsilon = epsilon_by_step(global_step, config)
-					actions.append(agent.select_action(states[w], action_mask, epsilon))
+					actions.append(agent.select_action(states[w], action_features, epsilon))
 
 				# step all workers in parallel
 				results = vec.step(actions)
 				for w, (next_obs, reward, terminated, truncated, next_info) in enumerate(results):
 					next_state = next_obs
-					next_mask = np.asarray(next_info["action_mask"], dtype=np.bool_)
+					action_features = encode_legal_actions(infos[w], action_encoder)
+					next_action_features = encode_legal_actions(next_info, action_encoder) if not (terminated or truncated) else np.zeros((1, config.action_feature_dim), dtype=np.float32)
 
 					replay.add(
 						Transition(
@@ -397,7 +435,8 @@ def run_training(config: DQNConfig) -> dict[str, Any]:
 							reward=float(np.clip(reward / max(1.0, config.reward_scale), -1.0, 1.0)),
 							next_state=next_state,
 							done=bool(terminated or truncated),
-							next_action_mask=next_mask,
+							action_features=action_features,
+							next_action_features=next_action_features,
 						)
 					)
 
@@ -457,6 +496,7 @@ def run_training(config: DQNConfig) -> dict[str, Any]:
 			# Single-worker (original) loop
 			obs, info = env.reset(seed=config.seed + episode)
 			state = encoder.encode(obs["state_json"])
+			action_features = encode_legal_actions(info, action_encoder)
 			episode_reward = 0.0
 			episode_loss_values: list[float] = []
 			episode_steps = 0
@@ -464,12 +504,11 @@ def run_training(config: DQNConfig) -> dict[str, Any]:
 			episode_start = time.perf_counter()
 
 			for _ in range(config.max_steps_per_episode):
-				action_mask = np.asarray(info["action_mask"], dtype=np.bool_)
 				epsilon = epsilon_by_step(global_step, config)
-				action = agent.select_action(state, action_mask, epsilon)
+				action = agent.select_action(state, action_features, epsilon)
 				next_obs, reward, terminated, truncated, next_info = env.step(action)
 				next_state = encoder.encode(next_obs["state_json"])
-				next_mask = np.asarray(next_info["action_mask"], dtype=np.bool_)
+				next_action_features = encode_legal_actions(next_info, action_encoder) if not (terminated or truncated) else np.zeros((1, config.action_feature_dim), dtype=np.float32)
 
 				replay.add(
 					Transition(
@@ -478,11 +517,13 @@ def run_training(config: DQNConfig) -> dict[str, Any]:
 						reward=float(np.clip(reward / max(1.0, config.reward_scale), -1.0, 1.0)),
 						next_state=next_state,
 						done=bool(terminated or truncated),
-						next_action_mask=next_mask,
+						action_features=action_features,
+						next_action_features=next_action_features,
 					)
 				)
 
 				state = next_state
+				action_features = next_action_features
 				info = next_info
 				episode_reward += float(reward)
 				episode_steps += 1
@@ -508,7 +549,7 @@ def run_training(config: DQNConfig) -> dict[str, Any]:
 		epsilon = epsilon_by_step(global_step, config)
 		eval_reward = None
 		if config.eval_every_episodes > 0 and (episode + 1) % config.eval_every_episodes == 0:
-			eval_results = evaluate_agent(agent, config, encoder, config.eval_episodes, seed_offset=config.eval_seed_offset + episode * 100)
+			eval_results = evaluate_agent(agent, config, encoder, action_encoder, config.eval_episodes, seed_offset=config.eval_seed_offset + episode * 100)
 			eval_reward = float(np.mean(eval_results["episode_rewards"])) if eval_results["episode_rewards"] else None
 			if eval_reward is not None and eval_reward > best_eval_reward:
 				best_eval_reward = eval_reward
@@ -554,12 +595,13 @@ def run_evaluation(config: DQNConfig) -> dict[str, Any]:
 	torch.manual_seed(config.seed)
 
 	encoder = JsonStateEncoder(config.encoder_mode, config.engineered_dim, config.raw_dim)
+	action_encoder = ActionTextEncoder(config.action_feature_dim)
 	checkpoint_path = Path(config.checkpoint_path)
 	if not checkpoint_path.exists():
 		raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 	agent, _ = DQNAgent.load(checkpoint_path, config=config)
 	agent.online.eval()
-	results = evaluate_agent(agent, config, encoder, config.eval_episodes)
+	results = evaluate_agent(agent, config, encoder, action_encoder, config.eval_episodes)
 	return results
 
 
@@ -575,6 +617,7 @@ def parse_args() -> argparse.Namespace:
 		subparser.add_argument("--encoder-mode", choices=("engineered", "raw", "combined"), default=DEFAULT_ENCODER_MODE)
 		subparser.add_argument("--engineered-dim", type=int, default=ENGINEERED_FEATURE_DIM)
 		subparser.add_argument("--raw-dim", type=int, default=RAW_FEATURE_DIM)
+		subparser.add_argument("--action-feature-dim", type=int, default=192)
 		subparser.add_argument("--hidden-dim", type=int, default=256)
 		subparser.add_argument("--compile-first", action=argparse.BooleanOptionalAction, default=True)
 		subparser.add_argument("--max-steps-per-episode", type=int, default=2_000)
@@ -618,6 +661,7 @@ def config_from_args(args: argparse.Namespace) -> DQNConfig:
 		encoder_mode=args.encoder_mode,
 		engineered_dim=args.engineered_dim,
 		raw_dim=args.raw_dim,
+		action_feature_dim=args.action_feature_dim,
 		hidden_dim=args.hidden_dim,
 		checkpoint_path=args.checkpoint_path,
 		max_steps_per_episode=args.max_steps_per_episode,

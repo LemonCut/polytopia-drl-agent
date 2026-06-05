@@ -139,7 +139,7 @@ class JsonStateEncoder:
 
         def encode_units(units: dict[str, Any]) -> None:
             if not isinstance(units, dict) or not units:
-                for _ in range(14):
+                for _ in range(29):
                     add(0.0)
                 return
             current_hp = []
@@ -170,7 +170,7 @@ class JsonStateEncoder:
 
         def encode_cities(cities: dict[str, Any]) -> None:
             if not isinstance(cities, dict) or not cities:
-                for _ in range(16):
+                for _ in range(33):
                     add(0.0)
                 return
             level = []
