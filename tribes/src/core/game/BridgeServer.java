@@ -318,7 +318,7 @@ public class BridgeServer {
         } else if (agentName.equalsIgnoreCase("AZMCTSAgent") || agentName.equalsIgnoreCase("AZ_MCTS")) {
             players.azmcts.MCTSParams params = new players.azmcts.MCTSParams();
             params.stop_type = params.STOP_ITERATIONS;
-            params.num_iterations = 128;
+            params.num_iterations = 256;
             params.heuristic_method = params.DIFF_HEURISTIC;
             params.PRIORITIZE_ROOT = false; // AZ usually evaluates all actions together
             params.ROLLOUT_LENGTH = 10;
@@ -326,6 +326,9 @@ public class BridgeServer {
             params.ROLOUTS_ENABLED = true;
             params.NEURAL_PRIORS = true;
             params.NEURAL_VALUE = true;
+            params.SELECT_MOST_VISITED_ACTION = true;
+            params.DIRICHLET_ALPHA = 0.15;
+            params.CPUCT = 1.25;
             ag = new players.azmcts.MCTSPlayer(seed, params);
         } else {
             throw new IllegalArgumentException("Unsupported Java agent type: " + agentName);
