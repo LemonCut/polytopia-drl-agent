@@ -70,7 +70,8 @@ class Run {
         RHEA,
         OEP,
         EMCTS,
-        PORTFOLIO_MCTS
+        PORTFOLIO_MCTS,
+        PURE_MCTS
     }
 
     public static double K_INIT_MULT = 0.5;
@@ -83,7 +84,7 @@ class Run {
     public static boolean PRUNING;
     public static boolean PROGBIAS;
     public static boolean FORCE_TURN_END;
-    public static boolean MCTS_ROLLOUTS;
+    public static boolean MCTS_ROLLOUTS = true;
     public static int POP_SIZE;
 
 
@@ -102,6 +103,7 @@ class Run {
             case "OEP": return Run.PlayerType.OEP;
             case "pMCTS": return Run.PlayerType.PORTFOLIO_MCTS;
             case "EMCTS": return Run.PlayerType.EMCTS;
+            case "PURE_MCTS": return Run.PlayerType.PURE_MCTS;
         }
         throw new Exception("Error: unrecognized Player Type: " + arg);
     }
@@ -165,6 +167,15 @@ class Run {
                 mctsParams.FORCE_TURN_END = FORCE_TURN_END ? 5 : mctsParams.ROLLOUT_LENGTH + 1;
                 mctsParams.ROLOUTS_ENABLED = MCTS_ROLLOUTS;
                 return new MCTSPlayer(agentSeed, mctsParams);
+            case PURE_MCTS:
+                MCTSParams pureMctsParams = new MCTSParams();
+                pureMctsParams.stop_type = pureMctsParams.STOP_FMCALLS;
+                pureMctsParams.heuristic_method = pureMctsParams.NO_HEURISTIC;
+                pureMctsParams.PRIORITIZE_ROOT = true;
+                pureMctsParams.ROLLOUT_LENGTH = MAX_LENGTH;
+                pureMctsParams.FORCE_TURN_END = FORCE_TURN_END ? 5 : pureMctsParams.ROLLOUT_LENGTH + 1;
+                pureMctsParams.ROLOUTS_ENABLED = MCTS_ROLLOUTS;
+                return new MCTSPlayer(agentSeed, pureMctsParams);
             case PORTFOLIO_MCTS:
                 PortfolioMCTSParams portfolioMCTSParams = new PortfolioMCTSParams();
                 portfolioMCTSParams.stop_type = portfolioMCTSParams.STOP_FMCALLS;

@@ -44,7 +44,7 @@ public class MCTSParams extends AlgParams {
         HashMap<String, Object[]> parameterValues = new HashMap<>();
         parameterValues.put("K", new Double[]{1.0, Math.sqrt(2), 2.0});
         parameterValues.put("rollout_depth", new Integer[]{5, 8, 10, 12, 15});
-        parameterValues.put("heuristic_method", new Integer[]{ENTROPY_HEURISTIC, SIMPLE_HEURISTIC, DIFF_HEURISTIC});
+        parameterValues.put("heuristic_method", new Integer[]{ENTROPY_HEURISTIC, SIMPLE_HEURISTIC, DIFF_HEURISTIC, NO_HEURISTIC});
         return parameterValues;
     }
 

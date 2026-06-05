@@ -59,8 +59,12 @@ def run_game(agents, tribes, level_seed=-1, game_seed=-1, max_steps=2000, visual
             )
             python_encoders[i] = encoder
             java_agent_names.append("Python")
-        elif path.exists() and path.suffix == ".pth":
-            path_str = str(path.absolute())
+        elif (path.exists() and path.suffix == ".pth") or agent_arg in ["AZ_MCTS", "AZMCTSAgent"]:
+            if agent_arg in ["AZ_MCTS", "AZMCTSAgent"]:
+                path = Path("checkpoints/neural_policy.pth")
+                path_str = str(path.absolute())
+            else:
+                path_str = str(path.absolute())
             
             # Check if process is still alive
             if path_str in _GLOBAL_UVICORN_PROCESSES:
@@ -95,8 +99,11 @@ def run_game(agents, tribes, level_seed=-1, game_seed=-1, max_steps=2000, visual
             # Inject the URL into the environment so the Java agent can reach it
             os.environ[f"TRIBES_POLICY_URL_PLAYER_{i}"] = f"http://127.0.0.1:{port}/query"
             
-            # Tell Java to use the NeuralPolicyAgent
-            java_agent_names.append("NeuralPolicyAgent")
+            if agent_arg in ["AZ_MCTS", "AZMCTSAgent"]:
+                java_agent_names.append("AZ_MCTS")
+            else:
+                # Tell Java to use the NeuralPolicyAgent
+                java_agent_names.append("NeuralPolicyAgent")
         else:
             java_agent_names.append(agent_arg)
             

@@ -281,7 +281,16 @@ public class BridgeServer {
             params.PRIORITIZE_ROOT = true;
             params.ROLLOUT_LENGTH = 10;
             params.FORCE_TURN_END = 11;
-            params.ROLOUTS_ENABLED = false;
+            params.ROLOUTS_ENABLED = true;
+            ag = new players.mcts.MCTSPlayer(seed, params);
+        } else if (agentName.equalsIgnoreCase("PURE_MCTS")) {
+            players.mcts.MCTSParams params = new players.mcts.MCTSParams();
+            params.stop_type = params.STOP_FMCALLS;
+            params.heuristic_method = params.NO_HEURISTIC;
+            params.PRIORITIZE_ROOT = false;
+            params.ROLLOUT_LENGTH = 10;
+            params.FORCE_TURN_END = 11;
+            params.ROLOUTS_ENABLED = true;
             ag = new players.mcts.MCTSPlayer(seed, params);
         } else if (agentName.equalsIgnoreCase("RHEA")) {
             players.rhea.RHEAParams params = new players.rhea.RHEAParams();
@@ -306,15 +315,17 @@ public class BridgeServer {
             ag = new players.HumanAgent(ac);
         } else if (agentName.equalsIgnoreCase("NeuralPolicyAgent")) {
             ag = new players.NeuralPolicyAgent(seed);
-        } else if (agentName.equalsIgnoreCase("AZMCTSAgent")) {
+        } else if (agentName.equalsIgnoreCase("AZMCTSAgent") || agentName.equalsIgnoreCase("AZ_MCTS")) {
             players.azmcts.MCTSParams params = new players.azmcts.MCTSParams();
             params.stop_type = params.STOP_ITERATIONS;
             params.num_iterations = 128;
             params.heuristic_method = params.DIFF_HEURISTIC;
-            params.PRIORITIZE_ROOT = true;
+            params.PRIORITIZE_ROOT = false; // AZ usually evaluates all actions together
             params.ROLLOUT_LENGTH = 10;
             params.FORCE_TURN_END = 11;
-            params.ROLOUTS_ENABLED = false;
+            params.ROLOUTS_ENABLED = true;
+            params.NEURAL_PRIORS = true;
+            params.NEURAL_VALUE = true;
             ag = new players.azmcts.MCTSPlayer(seed, params);
         } else {
             throw new IllegalArgumentException("Unsupported Java agent type: " + agentName);

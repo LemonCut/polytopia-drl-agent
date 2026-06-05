@@ -15,6 +15,7 @@ public class AlgParams
     public final int ENTROPY_HEURISTIC = 0;
     public final int SIMPLE_HEURISTIC = 1;
     public final int DIFF_HEURISTIC = 2;
+    public final int NO_HEURISTIC = 3;
     public int heuristic_method = SIMPLE_HEURISTIC;
 
     public double epsilon = 1e-6;
@@ -35,7 +36,7 @@ public class AlgParams
 
     public Map<String, String[]> constantNames() {
         HashMap<String, String[]> names = new HashMap<>();
-        names.put("heuristic_method", new String[]{"SIMPLE_HEURISTIC", "ENTROPY_HEURISTIC"});
+        names.put("heuristic_method", new String[]{"SIMPLE_HEURISTIC", "ENTROPY_HEURISTIC", "DIFF_HEURISTIC", "NO_HEURISTIC"});
         return names;
     }
 
@@ -47,6 +48,8 @@ public class AlgParams
             return new TribesSimpleHeuristic(playerID, allIDs);
         else if (heuristic_method == DIFF_HEURISTIC)
             return new TribesDiffHeuristic(playerID, allIDs);
+        else if (heuristic_method == NO_HEURISTIC)
+            return new TribesNoHeuristic(playerID, allIDs);
         return null;
     }
 
