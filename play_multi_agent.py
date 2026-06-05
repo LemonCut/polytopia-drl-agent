@@ -13,6 +13,8 @@ import torch
 
 from dqn import DQNAgent, DQNConfig
 from ppo import PPOAgent, PPOConfig
+from rank_a2c import RankA2CAgent, RankA2CConfig
+from expert_rank_distill import ActionTextEncoder, encode_legal_actions
 
 from tribes_env import TribesEnv
 from encoder import JsonStateEncoder
@@ -32,6 +34,7 @@ def run_game(agents, tribes, level_seed=-1, game_seed=-1, max_steps=2000, visual
         
     python_agents = {}
     python_encoders = {}
+    python_action_encoders = {}
     java_agent_names = []
     
     for i, agent_arg in enumerate(agents):
@@ -44,6 +47,13 @@ def run_game(agents, tribes, level_seed=-1, game_seed=-1, max_steps=2000, visual
                 loaded_config.device = ("cuda" if torch.cuda.is_available() else
                                         "mps" if torch.mps.is_available() else "cpu")
                 agent, extra = PPOAgent.load(path, config=loaded_config)
+            
+            elif "action_feature_dim" in checkpoint_config: # specific to RankA2C
+                loaded_config = RankA2CConfig(**checkpoint_config)
+                loaded_config.device = ("cuda" if torch.cuda.is_available() else
+                                        "mps" if torch.mps.is_available() else "cpu")
+                agent, extra = RankA2CAgent.load(path, config=loaded_config)
+                python_action_encoders[i] = ActionTextEncoder(agent.config.action_feature_dim)
             
             else: # assume DQN, will need to change later for other models
                 loaded_config = DQNConfig(**checkpoint["config"])
@@ -134,7 +144,14 @@ def run_game(agents, tribes, level_seed=-1, game_seed=-1, max_steps=2000, visual
                 encoder = python_encoders[active_tribe_id]
                 state = encoder.encode(obs["state_json"])
                 action_mask = np.asarray(info["action_mask"], dtype=np.bool_)
-                action = agent.select_action(state, action_mask, epsilon=0.0, greedy=True)
+                
+                if isinstance(agent, RankA2CAgent):
+                    action_encoder = python_action_encoders[active_tribe_id]
+                    action_features = encode_legal_actions(info, action_encoder)
+                    action, _, _ = agent.act(state, action_features, greedy=True)
+                else:
+                    action = agent.select_action(state, action_mask, epsilon=0.0, greedy=True)
+                    
                 obs, reward, terminated, truncated, info = env.step(action)
             else:
                 obs, reward, terminated, truncated, info = env.agent_step()
